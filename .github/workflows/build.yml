@@ -1,0 +1,47 @@
+name: Build SideStore renewal fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: SideStore/SideStore
+          ref: 6032424a0e56c1c319762e786099bdd9186a238b
+          submodules: recursive
+          persist-credentials: false
+          path: upstream
+
+      - name: Build and archive SideStore
+        working-directory: upstream
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+          IS_ALPHA: '1'
+        run: |
+          xcodebuild -version
+          brew install ldid
+          git apply --check --ignore-space-change --unidiff-zero ../sidestore-0.7.0-alpha.patch
+          git apply --ignore-space-change --unidiff-zero ../sidestore-0.7.0-alpha.patch
+          make build fakesign ipa
+          shasum -a 256 SideStore.ipa > SideStore.ipa.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidestore-renewal-fix
+          path: |
+            upstream/SideStore.ipa
+            upstream/SideStore.ipa.sha256
+          if-no-files-found: error
+          retention-days: 1

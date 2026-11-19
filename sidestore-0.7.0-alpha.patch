@@ -1,0 +1,158 @@
+--- a/Shared/Extensions/Bundle+AltStore.swift
++++ b/Shared/Extensions/Bundle+AltStore.swift
+@@ -81,2 +81,7 @@
+-        let appGroup = self.appGroups.first { $0.contains(Bundle.baseAltStoreAppGroupID) }
+-        return appGroup
++        if let group = self.appGroups.first(where: { $0.contains(Bundle.baseAltStoreAppGroupID) }) {
++            return group
++        }
++        let groups = self.appGroups.filter {
++            $0.hasPrefix("group.XTL-") && $0.hasSuffix("." + Bundle.Info.appbundleIdentifier)
++        }
++        return groups.count == 1 ? groups.first : nil
+--- a/AltStore/My Apps/MyAppsViewController.swift
++++ b/AltStore/My Apps/MyAppsViewController.swift
+@@ -1406,27 +1406,27 @@
+-    private func getPreviousBackupURL(_ installedApp: InstalledApp) -> URL
+-    {
+-        let backupURL = FileManager.default.backupDirectoryURL(for: installedApp)!
+-        let backupBakURL = ImportExport.getPreviousBackupURL(backupURL)
+-        return backupBakURL
+-    }
+-    
+-    func restorePreviousBackup(for installedApp: InstalledApp){
+-        let backupURL = FileManager.default.backupDirectoryURL(for: installedApp)!
+-        let backupBakURL = ImportExport.getPreviousBackupURL(backupURL)
+-        
+-        // backupBakURL is expected to exist at this point, this needs to be ensured by caller logic
+-        // or invoke this action only when backupBakURL exists
+-        
+-        // delete the current backup
+-        if(FileManager.default.fileExists(atPath: backupURL.path)){
+-            try! FileManager.default.removeItem(at: backupURL)
+-        }
+-        
+-        // restore the previously saved backup as current backup
+-        // (don't delete the N-1 backup yet so copy instead of move)
+-        try! FileManager.default.copyItem(at: backupBakURL, to: backupURL)
+-        
+-        //perform restore of data from the backup
+-        restore(installedApp)
+-    }
+-    
++    private func getPreviousBackupURL(_ installedApp: InstalledApp) -> URL?
++    {
++        guard let backupURL = FileManager.default.backupDirectoryURL(for: installedApp) else { return nil }
++        return ImportExport.getPreviousBackupURL(backupURL)
++    }
++
++    func restorePreviousBackup(for installedApp: InstalledApp)
++    {
++        let files = FileManager.default
++        guard let backupURL = files.backupDirectoryURL(for: installedApp) else { return }
++        let previousURL = ImportExport.getPreviousBackupURL(backupURL)
++        let stagedURL = backupURL.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
++        defer { try? files.removeItem(at: stagedURL) }
++
++        do {
++            try files.copyItem(at: previousURL, to: stagedURL)
++            if files.fileExists(atPath: backupURL.path) {
++                _ = try files.replaceItemAt(backupURL, withItemAt: stagedURL)
++            } else {
++                try files.moveItem(at: stagedURL, to: backupURL)
++            }
++            restore(installedApp)
++        } catch {
++            ToastView(error: error, opensLog: true).show(in: self)
++        }
++    }
++
+@@ -2015 +2015 @@
+-        if FileManager.default.fileExists(atPath: getPreviousBackupURL(installedApp).path){
++        if let previousURL = getPreviousBackupURL(installedApp), FileManager.default.fileExists(atPath: previousURL.path) {
+--- a/SideStore/Core/Operations/PipelineOperations/FetchProvisioningProfilesOperation.swift
++++ b/SideStore/Core/Operations/PipelineOperations/FetchProvisioningProfilesOperation.swift
+@@ -129,0 +130,30 @@
++    private func originalXtoolProfile(for target: ALTApplication, parent: ALTApplication?, team: ALTTeam) throws -> ALTProvisioningProfile? {
++        let base = parent ?? target
++        let signed = base.isAltStoreApp ? ALTApplication(fileURL: Bundle.Info.activeBundleURL) : base
++        guard let signed, signed.bundleIdentifier.hasPrefix("XTL-"),
++              self.context.customBundleIdentifier == nil || self.context.customBundleIdentifier == signed.bundleIdentifier else {
++            return nil
++        }
++
++        let targetBundle: ALTApplication
++        if parent == nil {
++            targetBundle = signed
++        } else {
++            let prefix = base.bundleIdentifier + "."
++            guard target.bundleIdentifier.hasPrefix(prefix),
++                  let installedExtension = signed.appExtensions.first(where: {
++                      $0.bundleIdentifier == signed.bundleIdentifier + "." + target.bundleIdentifier.dropFirst(prefix.count)
++                  }) else {
++                throw OperationError.invalidParameters("The signed app extension could not be matched.")
++            }
++            targetBundle = installedExtension
++        }
++
++        guard let profile = targetBundle.provisioningProfile,
++              profile.bundleIdentifier == targetBundle.bundleIdentifier,
++              profile.teamIdentifier == team.identifier else {
++            throw OperationError.invalidParameters("Use the developer team that signed this app.")
++        }
++        return profile
++    }
++
+@@ -132,0 +163,4 @@
++        let originalProfile = try self.originalXtoolProfile(for: targetAppBundle, parent: parentAppBundle, team: team)
++        if let originalProfile {
++            return try await self.renewOriginalProfile(originalProfile, for: targetAppBundle, team: team)
++        }
+@@ -179,0 +214,15 @@
++
++    private func renewOriginalProfile(_ original: ALTProvisioningProfile, for app: ALTApplication, team: ALTTeam) async throws -> ALTProvisioningProfile {
++        let appID = try await self.registerAppID(for: app, name: app.name, bundleIdentifier: original.bundleIdentifier, team: team, existingOnly: true)
++        let profile = try await DeveloperPortalProxy.shared.downloadProvisioningProfile(for: appID, deviceType: DeveloperPortalProxy.currentDeviceType, team: team)
++        let originalGroups = Set(original.entitlements[.appGroups] as? [String] ?? [])
++        let originalCertificates = Set(original.certificates.map { $0.serialNumber })
++        guard profile.bundleIdentifier == original.bundleIdentifier,
++              profile.teamIdentifier == original.teamIdentifier,
++              Set(profile.entitlements[.appGroups] as? [String] ?? []) == originalGroups,
++              Set(profile.deviceIDs).isSuperset(of: original.deviceIDs),
++              originalCertificates.isSubset(of: profile.certificates.map { $0.serialNumber }) else {
++            throw OperationError.invalidParameters("The renewed profile changed the original app's signing scope.")
++        }
++        return profile
++    }
+@@ -188 +237,2 @@
+-                               team: ALTTeam) async throws -> ALTAppID {
++                               team: ALTTeam,
++                               existingOnly: Bool = false) async throws -> ALTAppID {
+@@ -206,0 +257,3 @@
++            guard !existingOnly else {
++                throw OperationError.invalidParameters("The original app ID is unavailable on the active team.")
++            }
+--- a/SideStore/Core/Operations/PipelineOperations/RefreshAppOperation.swift
++++ b/SideStore/Core/Operations/PipelineOperations/RefreshAppOperation.swift
+@@ -24,2 +24,3 @@
+-        guard let profiles = self.context.provisioningProfiles else {
+-            throw OperationError.invalidParameters("RefreshAppOperation.execute: self.context.provisioningProfiles is nil")
++        guard let profiles = self.context.provisioningProfiles,
++              let mainProfile = profiles[self.context.targetBundleIdentifier] else {
++            throw OperationError.invalidParameters("RefreshAppOperation.execute: missing main provisioning profile")
+@@ -46 +47 @@
+-            try self.updateInstalledApp(for: appBundle, profiles: profiles, in: dbContext)
++            try self.updateInstalledApp(for: appBundle, mainProfile: mainProfile, profiles: profiles, in: dbContext)
+@@ -53 +54 @@
+-    private func updateInstalledApp(for appBundle: ALTApplication, profiles: [String: ALTProvisioningProfile], in dbContext: NSManagedObjectContext) throws -> InstalledApp {
++    private func updateInstalledApp(for appBundle: ALTApplication, mainProfile: ALTProvisioningProfile, profiles: [String: ALTProvisioningProfile], in dbContext: NSManagedObjectContext) throws -> InstalledApp {
+@@ -60 +61 @@
+-        installedApp.update(provisioningProfile: profiles.values.first!)
++        installedApp.update(provisioningProfile: mainProfile)
+--- a/SideStore/Views/Components/AppInfoView.swift
++++ b/SideStore/Views/Components/AppInfoView.swift
+@@ -72,2 +72,2 @@
+-                    InfoRow(label: "Expiration Date", value: formatDate(provisioningProfile?.expirationDate ?? installedApp.expirationDate))
+-                    InfoRow(label: "Refreshed Date", value: formatDate(provisioningProfile?.creationDate ?? installedApp.refreshedDate))
++                    InfoRow(label: "Expiration Date", value: formatDate(installedApp.expirationDate))
++                    InfoRow(label: "Refreshed Date", value: formatDate(installedApp.refreshedDate))
