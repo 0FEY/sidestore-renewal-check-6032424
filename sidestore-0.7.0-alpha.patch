@@ -71,7 +71,7 @@
 -        if FileManager.default.fileExists(atPath: getPreviousBackupURL(installedApp).path){
 +        if let previousURL = getPreviousBackupURL(installedApp), FileManager.default.fileExists(atPath: previousURL.path) {
 diff --git a/SideStore/Core/Operations/PipelineOperations/FetchProvisioningProfilesOperation.swift b/SideStore/Core/Operations/PipelineOperations/FetchProvisioningProfilesOperation.swift
-index 7b9338f..c4762da 100644
+index 7b9338f..9178a74 100644
 --- a/SideStore/Core/Operations/PipelineOperations/FetchProvisioningProfilesOperation.swift
 +++ b/SideStore/Core/Operations/PipelineOperations/FetchProvisioningProfilesOperation.swift
 @@ -129,0 +130,30 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
@@ -110,9 +110,19 @@ index 7b9338f..c4762da 100644
 +        if let originalProfile {
 +            return try await self.renewOriginalProfile(originalProfile, for: targetAppBundle, team: team)
 +        }
-@@ -179,0 +214,30 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
+@@ -179,0 +214,40 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
 +
 +    private func renewOriginalProfile(_ original: ALTProvisioningProfile, for app: ALTApplication, team: ALTTeam) async throws -> ALTProvisioningProfile {
++        let deviceID = original.deviceIDs.count == 1 ? original.deviceIDs.first : try? await fetchUDID(useStatic: true)
++        if let deviceID {
++            _ = try await TaskChainCoalescer.shared.coalesce(key: "original_device_\(team.identifier)_\(deviceID)") {
++                let devices = try await DeveloperPortalProxy.shared.fetchDevices(for: team, types: .all)
++                if !devices.contains(where: { $0.identifier == deviceID }) {
++                    try await DeveloperPortalProxy.shared.registerDevice(name: "iPhone", identifier: deviceID, type: DeveloperPortalProxy.currentDeviceType, team: team)
++                }
++                return true
++            }
++        }
 +        let appID = try await self.registerAppID(for: app, name: app.name, bundleIdentifier: original.bundleIdentifier, team: team)
 +        let prepared = try await self.updateFeatures(for: appID, targetAppBundle: app, team: team)
 +        let originalGroups = Set(original.entitlements[.appGroups] as? [String] ?? [])
